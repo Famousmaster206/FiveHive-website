@@ -155,7 +155,7 @@ const SearchBar = ({
 
             if (event.key === "ArrowUp") {
               event.preventDefault();
-              setSelectedIndex((index) => Math.max(index - 1, 0));
+              setSelectedIndex((index) => Math.max(index - 1, -1));
               return;
             }
 

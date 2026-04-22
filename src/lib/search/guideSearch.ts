@@ -1,4 +1,3 @@
-import Fuse from "fuse.js";
 import { collection, getDocs } from "firebase/firestore";
 
 import { db } from "@/lib/firebase";
@@ -384,22 +383,6 @@ export const loadGuideSearchItems = async (
   return items;
 };
 
-export const createGuideSearchFuse = (items: GuideChapterSearchItem[]) => {
-  return new Fuse(items, {
-    includeScore: true,
-    minMatchCharLength: 2,
-    threshold: 0.4,
-    ignoreLocation: false,
-    distance: 120,
-    keys: [
-      { name: "chapterTitle", weight: 0.62 },
-      { name: "unitTitle", weight: 0.14 },
-      { name: "subjectTitle", weight: 0.08 },
-      { name: "searchableText", weight: 0.16 },
-    ],
-  });
-};
-
 export const searchGuideChapters = (
   items: GuideChapterSearchItem[],
   query: string,
@@ -462,8 +445,8 @@ export const searchGuideChapters = (
     },
   ) => {
     return (
-      right.bodyCount - left.bodyCount ||
       right.titleCount - left.titleCount ||
+      right.bodyCount - left.bodyCount ||
       compareSearchItems(left.item, right.item)
     );
   };
