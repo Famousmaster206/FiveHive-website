@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import {useRouter, usePathname } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import { LoaderCircle, Search } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
