@@ -79,11 +79,9 @@ const buildSearchableText = (input: {
   subjectTitle: string;
   unitTitle: string;
   chapterTitle: string;
-  content?: unknown;
+  bodyText: string;
 }) => {
-  const blockText = collectText(input.content).join(" ");
-
-  return [input.subjectTitle, input.unitTitle, input.chapterTitle, blockText]
+  return [input.subjectTitle, input.unitTitle, input.chapterTitle, input.bodyText]
     .join(" ")
     .replace(/\s+/g, " ")
     .trim();
@@ -245,7 +243,9 @@ const mapSubjectToSearchItems = (
 
     const perUnitItems = await Promise.all(
       units.map(async (unit, unitIndex) => {
-        const chapterDocs = await fetchChapterDocs(subjectSlug, unit.id);
+        const chapterDocs = canPreview
+          ? await fetchChapterDocs(subjectSlug, unit.id)
+          : [];
 
         return (unit.chapters ?? [])
           .filter((chapter) => isChapterVisible(chapter, canPreview))
@@ -267,6 +267,11 @@ const mapSubjectToSearchItems = (
                 chapterDocMatch?.data ?? chapterDocMatch?.content ?? null;
             }
 
+            const chapterBodyText = collectText(indexedContent)
+              .join(" ")
+              .replace(/\s+/g, " ")
+              .trim();
+
             return {
               subjectSlug,
               subjectTitle: subject.title,
@@ -286,12 +291,9 @@ const mapSubjectToSearchItems = (
                 subjectTitle: subject.title,
                 unitTitle: unit.title,
                 chapterTitle: chapter.title,
-                content: indexedContent,
+                bodyText: chapterBodyText,
               }),
-              chapterBodyText: collectText(indexedContent)
-                .join(" ")
-                .replace(/\s+/g, " ")
-                .trim(),
+              chapterBodyText,
             };
           });
       }),
@@ -313,12 +315,18 @@ const readCache = (canPreview: boolean): GuideChapterSearchItem[] | null => {
 
   try {
     const parsed = JSON.parse(rawValue) as GuideSearchCache;
+    if (typeof parsed.timestamp !== "number" || !Array.isArray(parsed.items)) {
+      localStorage.removeItem(getCacheKey(canPreview));
+      return null;
+    }
+
     if (Date.now() - parsed.timestamp > SEARCH_CACHE_TTL_MS) {
       return null;
     }
 
     return parsed.items;
   } catch {
+    localStorage.removeItem(getCacheKey(canPreview));
     return null;
   }
 };
@@ -333,7 +341,11 @@ const writeCache = (canPreview: boolean, items: GuideChapterSearchItem[]) => {
     items,
   };
 
-  localStorage.setItem(getCacheKey(canPreview), JSON.stringify(payload));
+  try {
+    localStorage.setItem(getCacheKey(canPreview), JSON.stringify(payload));
+  } catch (error) {
+    console.warn("Failed to persist guide search cache", error);
+  }
 };
 
 const compareSearchItems = (
