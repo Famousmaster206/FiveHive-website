@@ -14,6 +14,7 @@ import AdminImport from "@/components/admin/AdminImport";
 import { doc, updateDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { Button } from "@/components/ui/button";
+import FeedbackQueue from "@/components/feedback/FeedbackQueue";
 
 const apClasses = apClassesData.apClasses;
 
@@ -44,6 +45,7 @@ const Page = () => {
         {user.access === "admin" && (
           <>
             <AdminPanel user={user} />
+            <FeedbackQueue />
             <h2 className="mt-6 text-2xl font-bold">Validate Editor JSON</h2>
             <AdminImport />
           </>

@@ -1,6 +1,7 @@
 import { cn } from "@/lib/utils";
 import Image from "next/image";
 import Link from "next/link";
+import FeedbackEditorModal from "@/components/feedback/FeedbackEditorModal";
 
 const links = [
   // {
@@ -14,10 +15,6 @@ const links = [
   {
     title: "Copyright",
     url: "/",
-  },
-  {
-    title: "Feedback",
-    url: "https://forms.gle/1J1VWe9rEMp3kfC78",
   },
 ];
 
@@ -49,6 +46,7 @@ export default function Footer({ className }: { className?: string }) {
               Discord
             </Link>
           </li>
+          <li id="feedback"><FeedbackEditorModal /></li>
         </ul>
       </div>
       <hr className="mb-4 mt-2" />

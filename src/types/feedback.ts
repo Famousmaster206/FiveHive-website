@@ -11,6 +11,13 @@ export type BugType =
 
 export type FeedbackStatus = "pending" | "approved" | "rejected";
 
+export type FeedbackImage = {
+  url: string;
+  storageRefFullPath?: string;
+  caption?: string;
+  pasted?: boolean;
+};
+
 export interface FeedbackSubmission {
   id: string;
   contact: string;
@@ -20,16 +27,24 @@ export interface FeedbackSubmission {
   bugUrl?: string;
   // Common fields
   description: string;
+  editorData?: Record<string, unknown>;
   imageUrls: string[];
+  images?: FeedbackImage[];
+  pageUrl?: string;
+  userAgent?: string;
   // Metadata
   status: FeedbackStatus;
   submittedAt: Timestamp;
   submittedBy: string | null;
+  submitterEmail?: string | null;
+  submitterDiscord?: string | null;
   // Review metadata (set after admin action)
   reviewedAt?: Timestamp;
   reviewedBy?: string;
   githubIssueUrl?: string;
   githubIssueNumber?: number;
+  adminNotes?: string;
+  rejectionReason?: string;
 }
 
 /** Human-readable display labels for bug sub-types */
