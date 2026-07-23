@@ -3,6 +3,7 @@
 import FRQTestRenderer from "@/components/frq/testRenderer";
 import usePathname from "@/components/client/pathname";
 import { db } from "@/lib/firebase";
+import { FRQ_TEMPLATE_COLLECTION, getFrqTemplateId } from "@/lib/frqStores";
 import { doc, getDoc } from "firebase/firestore";
 import { useEffect, useState } from "react";
 
@@ -26,7 +27,23 @@ const Page = () => {
       setFrq(null);
 
       try {
-        const docRef = doc(
+        const templateDocRef = doc(
+          db,
+          FRQ_TEMPLATE_COLLECTION,
+          getFrqTemplateId(subject, unitId!, frqId),
+        );
+
+        const templateDocSnap = await getDoc(templateDocRef);
+
+        if (templateDocSnap.exists()) {
+          setFrq({
+            id: templateDocSnap.id,
+            ...templateDocSnap.data(),
+          });
+          return;
+        }
+
+        const legacyDocRef = doc(
           db,
           "subjects",
           subject,
@@ -36,12 +53,12 @@ const Page = () => {
           frqId,
         );
 
-        const docSnap = await getDoc(docRef);
+        const legacyDocSnap = await getDoc(legacyDocRef);
 
-        if (docSnap.exists()) {
+        if (legacyDocSnap.exists()) {
           setFrq({
-            id: docSnap.id,
-            ...docSnap.data(),
+            id: legacyDocSnap.id,
+            ...legacyDocSnap.data(),
           });
         } else {
           setFrq(null);

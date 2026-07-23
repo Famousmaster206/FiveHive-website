@@ -1,14 +1,17 @@
 "use client";
 import React, { useEffect, useState } from "react";
 import {
-  collectionGroup,
+  collection,
+  deleteDoc,
+  doc,
+  DocumentData,
+  DocumentReference,
   getDocs,
-  updateDoc,
   orderBy,
   query,
-  DocumentReference,
-  deleteDoc,
-  DocumentData,
+  serverTimestamp,
+  updateDoc,
+  writeBatch,
 } from "firebase/firestore";
 import { useUser } from "@/components/hooks/UserContext";
 import { db } from "@/lib/firebase";
@@ -39,6 +42,10 @@ import {
   Trash2,
 } from "lucide-react";
 import { updateUserRole } from "@/components/hooks/users";
+import {
+  FRQ_GRADABLE_SUBMISSIONS_COLLECTION,
+  FRQ_GRADED_SUBMISSIONS_COLLECTION,
+} from "@/lib/frqStores";
 import {
   Sheet,
   SheetContent,
@@ -83,7 +90,7 @@ const FRQGraderPage = () => {
     const fetchAllResponses = async () => {
       try {
         const q = query(
-          collectionGroup(db, "frqResponses"),
+          collection(db, FRQ_GRADABLE_SUBMISSIONS_COLLECTION),
           orderBy("submittedAt", "desc"),
         );
         const querySnapshot = await getDocs(q);
@@ -110,27 +117,34 @@ const FRQGraderPage = () => {
   }, []);
 
   const submitGrade = async (
-    responseRef: DocumentReference,
+    responseRef: DocumentReference<DocumentData, DocumentData>,
+    responseId: string,
+    responseData: GraderView,
     index: number,
     grade: string,
     feedback: string,
   ) => {
     try {
-      await updateDoc(responseRef, {
+      const batch = writeBatch(db);
+      const gradedDocRef = doc(db, FRQ_GRADED_SUBMISSIONS_COLLECTION, responseId);
+
+      batch.set(gradedDocRef, {
+        ...responseData,
+        score: grade,
         grade,
         feedback,
-        gradedAt: new Date(),
+        gradedAt: serverTimestamp(),
+        graderId: user?.uid ?? "admin",
         gradedBy: user?.uid ?? "admin",
         status: "graded",
       });
+      batch.delete(responseRef);
+      await batch.commit();
 
       const updatedResponses = [...responses];
-      if (updatedResponses[index]) {
-        updatedResponses[index].grade = grade;
-        updatedResponses[index].feedback = feedback;
-        updatedResponses[index].status = "graded";
+      if (updatedResponses[index] !== undefined) {
+        updatedResponses.splice(index, 1);
         setResponses(updatedResponses);
-
         setUnsavedChanges(false);
         alert("Grade and feedback saved successfully!");
       } else {
@@ -428,7 +442,14 @@ const FRQGraderPage = () => {
                       variant={unsavedChanges ? "default" : "outline"}
                       className="mr-auto"
                       onClick={() =>
-                        submitGrade(res.ref, index, newGrade, newFeedback)
+                        submitGrade(
+                          res.ref,
+                          res.id ?? "",
+                          res,
+                          index,
+                          newGrade,
+                          newFeedback,
+                        )
                       }
                     >
                       Save

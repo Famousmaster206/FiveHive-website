@@ -1,6 +1,6 @@
 "use client";
 import React, { useEffect, useState } from "react";
-import { collection, query, orderBy, getDocs, doc } from "firebase/firestore";
+import { collection, query, orderBy, getDocs, where } from "firebase/firestore";
 import { useUser } from "@/components/hooks/UserContext";
 import { db } from "@/lib/firebase";
 import { FileCheck, FileClock, FileWarning, FileX } from "lucide-react";
@@ -19,6 +19,10 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
+import {
+  FRQ_GRADABLE_SUBMISSIONS_COLLECTION,
+  FRQ_GRADED_SUBMISSIONS_COLLECTION,
+} from "@/lib/frqStores";
 
 const MyFRQResponses = () => {
   const { user } = useUser();
@@ -30,20 +34,36 @@ const MyFRQResponses = () => {
       if (!user) return;
 
       try {
-        const userRef = doc(db, "users", user.uid);
-        const frqResponsesRef = collection(userRef, "frqResponses");
-        const q = query(frqResponsesRef, orderBy("submittedAt", "desc"));
-
-        const querySnapshot = await getDocs(q);
-        const data = querySnapshot.docs.map(
-          (doc) =>
-            ({
-              id: doc.id,
-              ...doc.data(),
-            }) as FRQSubmission,
+        const gradableQuery = query(
+          collection(db, FRQ_GRADABLE_SUBMISSIONS_COLLECTION),
+          where("userId", "==", user.uid),
+          orderBy("submittedAt", "desc"),
+        );
+        const gradedQuery = query(
+          collection(db, FRQ_GRADED_SUBMISSIONS_COLLECTION),
+          where("userId", "==", user.uid),
+          orderBy("submittedAt", "desc"),
         );
 
-        setResponses(data);
+        const [gradableSnapshot, gradedSnapshot] = await Promise.all([
+          getDocs(gradableQuery),
+          getDocs(gradedQuery),
+        ]);
+
+        const mergedResponses = [...gradableSnapshot.docs, ...gradedSnapshot.docs]
+          .map(
+            (docSnap) =>
+              ({
+                id: docSnap.id,
+                ...docSnap.data(),
+              }) as FRQSubmission,
+          )
+          .sort(
+            (a, b) =>
+              (b.submittedAt?.seconds ?? 0) - (a.submittedAt?.seconds ?? 0),
+          );
+
+        setResponses(mergedResponses);
       } catch (error) {
         console.error("Error fetching FRQ responses:", error);
       } finally {
