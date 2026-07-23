@@ -1,10 +1,20 @@
 "use client";
 import React, { useEffect, useState } from "react";
-import { collection, query, orderBy, getDocs, doc } from "firebase/firestore";
+import {
+  collection,
+  query,
+  orderBy,
+  getDocs,
+  where,
+} from "firebase/firestore";
 import { useUser } from "@/components/hooks/UserContext";
 import { db } from "@/lib/firebase";
 import { FileCheck, FileClock, FileWarning, FileX } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  GRADED_FRQ_SUBMISSIONS_COLLECTION,
+  GRADABLE_FRQ_SUBMISSIONS_COLLECTION,
+} from "@/lib/frq-store";
 
 import {
   Popover,
@@ -25,23 +35,53 @@ const MyFRQResponses = () => {
   const [responses, setResponses] = useState<FRQSubmission[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const formatTimestamp = (value: unknown) => {
+    if (
+      value &&
+      typeof value === "object" &&
+      "toDate" in value &&
+      typeof value.toDate === "function"
+    ) {
+      const timestampValue = value as { toDate: () => Date };
+      return timestampValue.toDate().toLocaleString();
+    }
+    return "Unknown";
+  };
+
   useEffect(() => {
     const fetchResponses = async () => {
       if (!user) return;
 
       try {
-        const userRef = doc(db, "users", user.uid);
-        const frqResponsesRef = collection(userRef, "frqResponses");
-        const q = query(frqResponsesRef, orderBy("submittedAt", "desc"));
-
-        const querySnapshot = await getDocs(q);
-        const data = querySnapshot.docs.map(
-          (doc) =>
-            ({
-              id: doc.id,
-              ...doc.data(),
-            }) as FRQSubmission,
+        const gradableQuery = query(
+          collection(db, GRADABLE_FRQ_SUBMISSIONS_COLLECTION),
+          where("ownerUserId", "==", user.uid),
+          orderBy("submittedAt", "desc"),
         );
+        const gradedQuery = query(
+          collection(db, GRADED_FRQ_SUBMISSIONS_COLLECTION),
+          where("ownerUserId", "==", user.uid),
+          orderBy("submittedAt", "desc"),
+        );
+
+        const [gradableSnapshot, gradedSnapshot] = await Promise.all([
+          getDocs(gradableQuery),
+          getDocs(gradedQuery),
+        ]);
+
+        const data: FRQSubmission[] = [...gradableSnapshot.docs, ...gradedSnapshot.docs]
+          .map((docSnap) => {
+            const submission = docSnap.data() as FRQSubmission;
+            return {
+              id: docSnap.id,
+              ...submission,
+            };
+          })
+          .sort((a, b) => {
+            const aMillis = a.submittedAt?.toMillis?.() ?? 0;
+            const bMillis = b.submittedAt?.toMillis?.() ?? 0;
+            return bMillis - aMillis;
+          });
 
         setResponses(data);
       } catch (error) {
@@ -69,7 +109,7 @@ const MyFRQResponses = () => {
       ) : (
         <ul className="grid gap-3">
           {responses.map((response) => {
-            const completelyGraded = !!response.grade && !!response.feedback;
+            const completelyGraded = !!response.score && !!response.feedback;
 
             return (
               <li
@@ -133,7 +173,7 @@ const MyFRQResponses = () => {
                     </span>
                   )}
                 </div>
-                <p>qID: {response.question?.id}</p>
+                <p>qID: {response.templateId}</p>
                 {/* <p>qPrompt: {response.question?.prompt}</p> */}
 
                 <Accordion type="single" collapsible className="mb-4">
@@ -149,16 +189,16 @@ const MyFRQResponses = () => {
                 {completelyGraded && (
                   <>
                     <strong>Grade:</strong>
-                    <p>{response.grade}</p>
+                    <p>{response.score}</p>
 
                     <strong>Feedback:</strong>
                     <p>{response.feedback}</p>
 
-                    {response.gradedAt?.toDate && (
+                    {response.gradedAt && (
                       <small>
                         <em>
-                          Graded: {response.gradedAt.toDate().toLocaleString()}
-                          {response.gradedBy ? ` by ${response.gradedBy}` : ""}
+                          Graded: {formatTimestamp(response.gradedAt)}
+                          {response.graderId ? ` by ${response.graderId}` : ""}
                         </em>
                       </small>
                     )}
@@ -173,9 +213,7 @@ const MyFRQResponses = () => {
                   }}
                 >
                   Submitted:{" "}
-                  {response.submittedAt?.toDate
-                    ? response.submittedAt.toDate().toLocaleString()
-                    : "Unknown"}
+                  {formatTimestamp(response.submittedAt)}
                 </small>
               </li>
             );

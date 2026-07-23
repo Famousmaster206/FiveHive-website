@@ -3,9 +3,9 @@ import React, { useEffect, useState } from "react";
 import { db } from "@/lib/firebase";
 import {
   doc,
-  collection,
   serverTimestamp,
   writeBatch,
+  collection,
 } from "firebase/firestore";
 import { useUser } from "@/components/hooks/UserContext";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,7 @@ import {
 import { cn } from "@/lib/utils";
 import { ShieldAlert } from "lucide-react";
 import { clearUserCache } from "@/components/hooks/users";
+import { GRADABLE_FRQ_SUBMISSIONS_COLLECTION } from "@/lib/frq-store";
 
 const matcher = new RegExpMatcher({
   ...englishDataset.build(),
@@ -90,24 +91,33 @@ const FRQSubmissionPage = () => {
     try {
       // Reference to user's FRQ responses subcollection
       const userRef = doc(db, "users", user.uid);
-      const frqResponseRef = doc(collection(userRef, "frqResponses"));
+      const gradableSubmissionRef = doc(
+        collection(db, GRADABLE_FRQ_SUBMISSIONS_COLLECTION),
+      );
+      const templateId =
+        "AP_" +
+        FRQYear +
+        "_" +
+        FRQSubject +
+        "_" +
+        FRQQuestionType +
+        "_" +
+        FRQQuestionNumber;
 
       const batch = writeBatch(db);
-      batch.set(frqResponseRef, {
-        responseText: response,
-        question: {
-          id:
-            "AP_" +
-            FRQYear +
-            "_" +
-            FRQSubject +
-            "_" +
-            FRQQuestionType +
-            "_" +
-            FRQQuestionNumber,
+      batch.set(gradableSubmissionRef, {
+        ownerUserId: user.uid,
+        templateId,
+        templateRef: {
+          subject: FRQSubject,
+          unitId: String(FRQYear),
+          templateId,
         },
-        userId: user.uid,
+        responseText: response,
         submittedAt: serverTimestamp(),
+        status: "ungraded",
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
       });
 
       batch.update(userRef, {

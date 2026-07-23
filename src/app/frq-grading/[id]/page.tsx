@@ -5,6 +5,7 @@ import { db } from "@/lib/firebase";
 import type { FRQSubmission } from "@/types/frq";
 import { doc, getDoc } from "firebase/firestore";
 import { useEffect, useState } from "react";
+import { GRADABLE_FRQ_SUBMISSIONS_COLLECTION } from "@/lib/frq-store";
 
 type PageProps = {
   params: {
@@ -19,7 +20,7 @@ const Page = ({ params }: PageProps) => {
   useEffect(() => {
     const fetchFrq = async () => {
       try {
-        const docRef = doc(db, "ungraded-frqs", params.id);
+        const docRef = doc(db, GRADABLE_FRQ_SUBMISSIONS_COLLECTION, params.id);
         const docSnap = await getDoc(docRef);
 
         if (docSnap.exists()) {

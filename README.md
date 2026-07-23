@@ -292,6 +292,11 @@ import { connectFirestoreEmulator, getFirestore } from "firebase/firestore";
 4. Run `firebase init` to initialize your Firebase project in the directory. You only need to initialize Firebase emulator. When asked to choose which emulators to set up, choose "authentication", "firestore", and "storage". Use the default ports and enable the emulator UI.
 5. Run `firebase emulators:start`, and you should see a warning at the bottom of the website. Then, try to create an account! 
 6. If you want admin privileges, log out of your account, modify the value of "access" in the Firestore Emulator UI, then log back in.
+7. To verify FRQ rules for the split FRQ stores (`frqs`, `gradable-frq-submissions`, `graded-frq-submissions`), run:
+
+```
+npm run test:firestore:rules:frq
+```
 
 If there are any issues with the process above, please tell us, and we'll fix it!
 

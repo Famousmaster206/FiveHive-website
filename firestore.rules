@@ -7,21 +7,54 @@ service cloud.firestore {
     function isAuthenticated() {
       return request.auth != null;
     }
+
+    function userAccessLevel() {
+      return isAuthenticated()
+        ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.access
+        : null;
+    }
     
     // Centralized function to check if the user is an admin
     function isAdmin() {
-      return isAuthenticated() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.access == "admin";
+      return userAccessLevel() == "admin";
     }
 
     // Centralized function to check if the user is a member or admin (role hierarchy)
     function isMemberOrAdmin() {
-      let accessLevel = get(/databases/$(database)/documents/users/$(request.auth.uid)).data.access;
-      return isAuthenticated() && (accessLevel == "admin" || accessLevel == "member");
+      let accessLevel = userAccessLevel();
+      return accessLevel == "admin" || accessLevel == "member";
+    }
+
+    function isGraderOrAdmin() {
+      let accessLevel = userAccessLevel();
+      return accessLevel == "admin" || accessLevel == "grader";
     }
 
     function isGraderOrMemberOrAdmin() {
-      let accessLevel = get(/databases/$(database)/documents/users/$(request.auth.uid)).data.access;
-      return isAuthenticated() && (accessLevel == "admin" || accessLevel == "member" || accessLevel == "grader");
+      let accessLevel = userAccessLevel();
+      return accessLevel == "admin" || accessLevel == "member" || accessLevel == "grader";
+    }
+
+    function isSubmissionOwner(ownerUserId) {
+      return isAuthenticated() && request.auth.uid == ownerUserId;
+    }
+
+    function hasTemplateRef(templateRef) {
+      return templateRef is map
+        && templateRef.keys().hasAll(["subject", "unitId", "templateId"])
+        && templateRef.keys().hasOnly(["subject", "unitId", "templateId"])
+        && templateRef.subject is string
+        && templateRef.unitId is string
+        && templateRef.templateId is string;
+    }
+
+    function hasImmutableSubmissionLinkage() {
+      return request.resource.data.ownerUserId == resource.data.ownerUserId
+        && request.resource.data.templateId == resource.data.templateId
+        && request.resource.data.templateRef == resource.data.templateRef
+        && request.resource.data.responseText == resource.data.responseText
+        && request.resource.data.submittedAt == resource.data.submittedAt
+        && request.resource.data.createdAt == resource.data.createdAt;
     }
 
     // Allow read/write access to users for their own user data
@@ -32,36 +65,9 @@ service cloud.firestore {
       allow update: if isAuthenticated() && request.auth.uid == userId && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['access', 'uid']));
       allow delete: if isAuthenticated() && request.auth.uid == userId;
 
-      match /frqResponses/{document=**} {
-        allow read: if isAuthenticated() && request.auth.uid == userId;
-
-        allow create: if isAuthenticated() && request.auth.uid == userId && (request.resource.data.keys().hasAll(['responseText', 'question', 'userId', 'submittedAt'])) && (request.resource.data.keys().hasOnly(['responseText', 'question', 'userId', 'submittedAt'])) && canSubmitFrqResponse();
-        allow update: if isGraderOrMemberOrAdmin() && (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['feedback', 'grade', 'gradedAt', 'gradedBy', 'status']));
-      }
-
       match /chapterData/{document=**} {
         allow read, write: if isAuthenticated() && request.auth.uid == userId;
       }
-    }
-
-    function canSubmitFrqResponse() {
-      let userDoc = get(/databases/$(database)/documents/users/$(request.auth.uid));
-      let userData = userDoc.data;
-
-      let userDocAfter = getAfter(/databases/$(database)/documents/users/$(request.auth.uid));
-      let userDataAfter = userDocAfter.data;
-
-      return userData.access != "banned" && (isAdmin() || (!("lastFrqResponseAt" in userData) && 
-        "lastFrqResponseAt" in userDataAfter
-      ) || (
-        userData.lastFrqResponseAt < (request.time - duration.value(6, 'h'))
-        &&
-        userDataAfter.lastFrqResponseAt == request.resource.data.submittedAt)
-      )
-    }
-
-    match /{somePath=**}/frqResponses/{frqResponse} {
-      allow read: if isGraderOrMemberOrAdmin();
     }
     
     // Admins can read/write all user documents
@@ -87,7 +93,60 @@ service cloud.firestore {
           allow read: if resource.data.isPublic == true || isMemberOrAdmin();
           allow write: if isMemberOrAdmin();
         }
+
+        match /frqs/{templateId} {
+          allow read: if resource.data.isPublic == true || isMemberOrAdmin();
+          allow write: if isAdmin();
+        }
       }
+    }
+
+    match /gradable-frq-submissions/{submissionId} {
+      allow create: if isSubmissionOwner(request.resource.data.ownerUserId)
+        && userAccessLevel() != "banned"
+        && request.resource.data.keys().hasAll(["ownerUserId", "templateId", "templateRef", "responseText", "submittedAt", "status", "createdAt", "updatedAt"])
+        && request.resource.data.keys().hasOnly(["ownerUserId", "templateId", "templateRef", "responseText", "submittedAt", "status", "createdAt", "updatedAt"])
+        && request.resource.data.ownerUserId is string
+        && request.resource.data.templateId is string
+        && hasTemplateRef(request.resource.data.templateRef)
+        && request.resource.data.templateRef.templateId == request.resource.data.templateId
+        && request.resource.data.responseText is string
+        && request.resource.data.status == "ungraded"
+        && request.resource.data.submittedAt == request.time
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow read: if isSubmissionOwner(resource.data.ownerUserId) || isGraderOrAdmin();
+      allow update: if isGraderOrAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "userBanned", "updatedAt"])
+        && hasImmutableSubmissionLinkage()
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if isGraderOrAdmin();
+    }
+
+    match /graded-frq-submissions/{gradedId} {
+      allow create: if isGraderOrAdmin()
+        && request.resource.data.keys().hasAll(["ownerUserId", "templateId", "templateRef", "responseText", "submittedAt", "status", "score", "feedback", "graderId", "gradedAt", "gradableSubmissionId", "userBanned", "createdAt", "updatedAt"])
+        && request.resource.data.keys().hasOnly(["ownerUserId", "templateId", "templateRef", "responseText", "submittedAt", "status", "score", "feedback", "graderId", "gradedAt", "gradableSubmissionId", "userBanned", "createdAt", "updatedAt"])
+        && request.resource.data.ownerUserId is string
+        && request.resource.data.templateId is string
+        && hasTemplateRef(request.resource.data.templateRef)
+        && request.resource.data.templateRef.templateId == request.resource.data.templateId
+        && request.resource.data.responseText is string
+        && request.resource.data.status == "graded"
+        && request.resource.data.score is string
+        && request.resource.data.feedback is string
+        && request.resource.data.graderId == request.auth.uid
+        && request.resource.data.gradedAt == request.time
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt == request.time;
+      allow read: if isSubmissionOwner(resource.data.ownerUserId) || isGraderOrAdmin();
+      allow update: if isGraderOrAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["score", "feedback", "status", "gradedAt", "updatedAt", "userBanned"])
+        && hasImmutableSubmissionLinkage()
+        && request.resource.data.graderId == resource.data.graderId
+        && request.resource.data.gradedAt is timestamp
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if isAdmin();
     }
     
     match /pages/{document=**} {
