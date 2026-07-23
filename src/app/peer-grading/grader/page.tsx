@@ -1,15 +1,17 @@
 "use client";
 import React, { useEffect, useState } from "react";
 import {
-  collectionGroup,
+  collection,
   getDocs,
   updateDoc,
   orderBy,
   query,
-  DocumentReference,
   deleteDoc,
-  DocumentData,
+  writeBatch,
+  doc,
+  serverTimestamp,
 } from "firebase/firestore";
+import type { DocumentData, DocumentReference } from "firebase/firestore";
 import { useUser } from "@/components/hooks/UserContext";
 import { db } from "@/lib/firebase";
 import { Button } from "@/components/ui/button";
@@ -57,6 +59,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import type { FRQSubmission, GradingStatus } from "@/types/frq";
+import {
+  GRADED_FRQ_SUBMISSIONS_COLLECTION,
+  GRADABLE_FRQ_SUBMISSIONS_COLLECTION,
+} from "@/lib/frq-store";
 
 const matcher = new RegExpMatcher({
   ...englishDataset.build(),
@@ -83,19 +89,21 @@ const FRQGraderPage = () => {
     const fetchAllResponses = async () => {
       try {
         const q = query(
-          collectionGroup(db, "frqResponses"),
+          collection(db, GRADABLE_FRQ_SUBMISSIONS_COLLECTION),
           orderBy("submittedAt", "desc"),
         );
         const querySnapshot = await getDocs(q);
 
-        const data = querySnapshot.docs.map(
-          (docSnap) =>
-            ({
+        const data: GraderView[] = querySnapshot.docs.map(
+          (docSnap) => {
+            const submission = docSnap.data() as FRQSubmission;
+            return {
               id: docSnap.id,
-              ...docSnap.data(),
+              ...submission,
               ref: docSnap.ref,
               showProfanity: false,
-            }) as GraderView,
+            } as GraderView;
+          },
         );
 
         setResponses(data);
@@ -116,19 +124,42 @@ const FRQGraderPage = () => {
     feedback: string,
   ) => {
     try {
+      const source = responses[index];
+      if (!source?.id) {
+        throw new Error("Response no longer available for grading.");
+      }
+
       await updateDoc(responseRef, {
-        grade,
-        feedback,
-        gradedAt: new Date(),
-        gradedBy: user?.uid ?? "admin",
         status: "graded",
+        updatedAt: serverTimestamp(),
       });
+
+      const batch = writeBatch(db);
+      batch.set(doc(db, GRADED_FRQ_SUBMISSIONS_COLLECTION, source.id), {
+        ownerUserId: source.ownerUserId,
+        templateId: source.templateId,
+        templateRef: source.templateRef,
+        responseText: source.responseText,
+        submittedAt: source.submittedAt,
+        status: "graded",
+        score: grade,
+        feedback,
+        graderId: user?.uid ?? "admin",
+        gradedAt: serverTimestamp(),
+        gradableSubmissionId: source.id,
+        userBanned: source.userBanned ?? false,
+        createdAt: source.createdAt ?? source.submittedAt,
+        updatedAt: serverTimestamp(),
+      });
+      batch.delete(responseRef);
+      await batch.commit();
 
       const updatedResponses = [...responses];
       if (updatedResponses[index]) {
-        updatedResponses[index].grade = grade;
+        updatedResponses[index].score = grade;
         updatedResponses[index].feedback = feedback;
         updatedResponses[index].status = "graded";
+        updatedResponses.splice(index, 1);
         setResponses(updatedResponses);
 
         setUnsavedChanges(false);
@@ -185,7 +216,7 @@ const FRQGraderPage = () => {
       });
       const updatedResponses = [...responses];
       updatedResponses.forEach((res) => {
-        if (res.userId === targetUserId) {
+        if (res.ownerUserId === targetUserId) {
           res.userBanned = true;
         }
       });
@@ -236,7 +267,7 @@ const FRQGraderPage = () => {
               key={res.id}
               className={cn(
                 "rounded-md border-2 p-3 shadow-sm",
-                res.status === "graded" && res.grade && res.feedback
+                res.status === "graded" && res.score && res.feedback
                   ? "border-green-600"
                   : "border-amber-300",
                 res.status === "flagged" && "border-orange-500",
@@ -250,12 +281,12 @@ const FRQGraderPage = () => {
                     ? res.submittedAt.toDate().toLocaleString()
                     : "Unknown"}
                   <br />
-                  UID: {res.userId} {res.userBanned && "(banned)"}
+                  UID: {res.ownerUserId} {res.userBanned && "(banned)"}
                   <br />
-                  QID: <strong>{res.question?.id ?? "Unknown"}</strong>
+                  QID: <strong>{res.templateId ?? "Unknown"}</strong>
                   <br />
                   {res.status}{" "}
-                  {res.status === "graded" && !res.grade && "(missing grade)"}
+                  {res.status === "graded" && !res.score && "(missing grade)"}
                   {res.status === "graded" &&
                     !res.feedback &&
                     "(missing feedback)"}
@@ -263,11 +294,11 @@ const FRQGraderPage = () => {
                 <button
                   className={cn(
                     "flex h-8 items-center rounded-sm border px-4 transition-colors hover:bg-stone-200",
-                    res.grade && res.feedback && "hidden",
+                    Boolean(res.score) && Boolean(res.feedback) && "hidden",
                   )}
                   onClick={() => {
-                    setNewFeedback(res.feedback ?? "");
-                    setNewGrade(res.grade ?? "");
+                    setNewFeedback(String(res.feedback ?? ""));
+                    setNewGrade(String(res.score ?? ""));
                     setResponses((prev) =>
                       prev.map((r, i) =>
                         i === index
@@ -284,11 +315,11 @@ const FRQGraderPage = () => {
                     <Ellipsis />
                   </DropdownMenuTrigger>
                   <DropdownMenuContent>
-                    {res.grade && res.feedback && (
+                    {res.score && res.feedback && (
                       <DropdownMenuItem
                         onClick={() => {
-                          setNewFeedback(res.feedback ?? "");
-                          setNewGrade(res.grade ?? "");
+                          setNewFeedback(String(res.feedback ?? ""));
+                          setNewGrade(String(res.score ?? ""));
                           setResponses((prev) =>
                             prev.map((r, i) =>
                               i === index
@@ -343,7 +374,9 @@ const FRQGraderPage = () => {
                           <Trash2 /> Delete
                         </DropdownMenuItem>
                         <DropdownMenuItem
-                          onClick={() => handleBanUser(res.userId, res.ref)}
+                          onClick={() =>
+                            handleBanUser(res.ownerUserId, res.ref)
+                          }
                         >
                           <Ban /> Ban User
                         </DropdownMenuItem>
@@ -376,7 +409,7 @@ const FRQGraderPage = () => {
 
                   if (confirmClose) {
                     setResponses((prev) =>
-                      prev.map((r, i) => ({ ...r, sheetOpen: false })),
+                    prev.map((r) => ({ ...r, sheetOpen: false })),
                     );
                     setUnsavedChanges(false);
                     setNewGrade("");
@@ -392,19 +425,19 @@ const FRQGraderPage = () => {
                         ? res.submittedAt.toDate().toLocaleString()
                         : "Unknown"}
                       <br />
-                      UID: {res.userId}
+                      UID: {res.ownerUserId}
                     </SheetDescription>
                   </SheetHeader>
 
                   <div className="sticky top-0 grid gap-2 border-b p-4 pb-2 backdrop-blur-sm">
                     <p>
-                      <strong>Question:</strong> {res.question?.id ?? "Unknown"}
+                      <strong>Question:</strong> {res.templateId ?? "Unknown"}
                     </p>
                     <label>
                       <strong>Grade</strong>
                       <Input
                         type="text"
-                        defaultValue={res.grade ?? ""}
+                        defaultValue={String(res.score ?? "")}
                         onChange={(e) => {
                           setNewGrade(e.target.value);
                           setUnsavedChanges(true);
@@ -415,7 +448,7 @@ const FRQGraderPage = () => {
                     <label>
                       <strong>Feedback</strong>
                       <Textarea
-                        defaultValue={res.feedback ?? ""}
+                        defaultValue={String(res.feedback ?? "")}
                         onChange={(e) => {
                           setNewFeedback(e.target.value);
                           setUnsavedChanges(true);

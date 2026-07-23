@@ -1,7 +1,9 @@
 "use client";
 
+import type { FRQTemplate } from "@/types/frq";
+
 type FRQTestRendererProps = {
-  frq: Record<string, unknown> | null;
+  frq: FRQTemplate | null;
   loading?: boolean;
   error?: string | null;
 };

@@ -4,13 +4,14 @@ import Link from "next/link";
 import { db } from "@/lib/firebase";
 import { collection, getDocs } from "firebase/firestore";
 import { useEffect, useState } from "react";
+import { GRADABLE_FRQ_SUBMISSIONS_COLLECTION } from "@/lib/frq-store";
 
 const Page = () => {
   const [frqIds, setFrqIds] = useState<string[] | null>(null);
 
   useEffect(() => {
     const fetchFrqs = async () => {
-      const collectionRef = collection(db, "ungraded-frqs");
+      const collectionRef = collection(db, GRADABLE_FRQ_SUBMISSIONS_COLLECTION);
       const snapshot = await getDocs(collectionRef);
       setFrqIds(snapshot.docs.map((doc) => doc.id));
     };
