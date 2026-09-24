@@ -49,8 +49,12 @@ function parseAnswers(value: unknown): SubmittedAnswers | null {
   const result: SubmittedAnswers = {};
   for (const [index, answerIds] of Object.entries(value)) {
     if (!/^\d+$/.test(index) || !Array.isArray(answerIds)) return null;
-    if (!answerIds.every((id) => typeof id === "string" && id.length > 0)) return null;
-    result[Number(index)] = answerIds;
+    const parsedAnswerIds: string[] = [];
+    for (const answerId of answerIds) {
+      if (typeof answerId !== "string" || answerId.length === 0) return null;
+      parsedAnswerIds.push(answerId);
+    }
+    result[Number(index)] = parsedAnswerIds;
   }
   return result;
 }
