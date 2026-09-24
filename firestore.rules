@@ -42,6 +42,39 @@ service cloud.firestore {
       match /chapterData/{document=**} {
         allow read, write: if isAuthenticated() && request.auth.uid == userId;
       }
+
+      // Dashboard progress is awarded and maintained by trusted server code.
+      // Students may view their own derived data, but may not alter it directly.
+      match /stats/{document=**} {
+        allow read: if isAuthenticated() && request.auth.uid == userId;
+      }
+
+      match /activity/{document=**} {
+        allow read: if isAuthenticated() && request.auth.uid == userId;
+      }
+
+      match /calendar/{document=**} {
+        allow read: if isAuthenticated() && request.auth.uid == userId;
+      }
+
+      // Notifications are created and deleted by trusted code. A recipient may
+      // only acknowledge one or extend/shorten its expiration.
+      match /notifications/{notificationId} {
+        allow read: if isAuthenticated() && request.auth.uid == userId;
+        allow update: if isAuthenticated()
+          && request.auth.uid == userId
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['readAt', 'expiresAt']);
+      }
+
+      // These records are user-managed dashboard state.
+      match /saved/{document=**} {
+        allow read, write: if isAuthenticated() && request.auth.uid == userId;
+      }
+
+      match /inProgress/{document=**} {
+        allow read, write: if isAuthenticated() && request.auth.uid == userId;
+      }
     }
 
     function canSubmitFrqResponse() {
