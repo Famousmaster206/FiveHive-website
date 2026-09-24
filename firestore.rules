@@ -42,6 +42,13 @@ service cloud.firestore {
       match /chapterData/{document=**} {
         allow read, write: if isAuthenticated() && request.auth.uid == userId;
       }
+
+      // Test results are written by the server endpoint with the student's ID
+      // token, just like chapter progress. The endpoint derives score and XP
+      // from the published test; clients only submit option IDs.
+      match /testData/{document=**} {
+        allow read, write: if isAuthenticated() && request.auth.uid == userId;
+      }
     }
 
     function canSubmitFrqResponse() {
