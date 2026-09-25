@@ -1,72 +1,55 @@
+import {
+  cert,
+  getApps,
+  initializeApp,
+  type ServiceAccount,
+} from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
+import { FieldValue, getFirestore } from "firebase-admin/firestore";
 import { NextResponse, type NextRequest } from "next/server";
 
+export const runtime = "nodejs";
+
 const READING_XP = 10;
-
-type FirestoreFields = Record<
-  string,
-  { booleanValue?: boolean; integerValue?: string }
->;
-
-type FirestoreDocument = {
-  name: string;
-  fields?: FirestoreFields;
-};
+const ADMIN_APP_NAME = "activity";
+const PRIVILEGED_ACCESS = ["admin", "member", "grader"];
 
 const isDocumentId = (value: unknown): value is string =>
-  typeof value === "string" && value.trim().length > 0 && !value.includes("/");
+  typeof value === "string" &&
+  value.trim().length > 0 &&
+  !value.includes("/") &&
+  value !== "." &&
+  value !== "..";
 
-const firestoreValue = (document: FirestoreDocument | undefined, field: string) =>
-  document?.fields?.[field];
+/**
+ * Awarding XP has to happen with credentials the reader does not have:
+ * writing as the reader would leave them free to grant themselves the bonus
+ * directly, or to clear the flag that makes it one-time.
+ */
+function adminServices() {
+  const existing = getApps().find((app) => app.name === ADMIN_APP_NAME);
+  if (existing) return { auth: getAuth(existing), db: getFirestore(existing) };
 
-const integerField = (document: FirestoreDocument | undefined, field: string) => {
-  const value = firestoreValue(document, field)?.integerValue;
-  return value === undefined ? 0 : Number.parseInt(value, 10) || 0;
-};
+  // Hosts mangle multi-line secrets, so base64 is accepted alongside raw JSON.
+  const key = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
+  if (!key) return null;
+  const json = key.trim().startsWith("{")
+    ? key
+    : Buffer.from(key, "base64").toString("utf8");
 
-async function getAuthenticatedUid(idToken: string, apiKey: string) {
-  const response = await fetch(
-    `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(apiKey)}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ idToken }),
-    },
-  );
-
-  if (!response.ok) return null;
-
-  const body = (await response.json()) as { users?: Array<{ localId?: string }> };
-  return body.users?.[0]?.localId ?? null;
-}
-
-async function transactionDocuments(
-  projectId: string,
-  idToken: string,
-  transaction: string,
-  names: string[],
-) {
-  const response = await fetch(
-    `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:batchGet`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${idToken}`,
-        "Content-Type": "application/json",
+  try {
+    const app = initializeApp(
+      {
+        credential: cert(JSON.parse(json) as ServiceAccount),
+        projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
       },
-      body: JSON.stringify({ documents: names, transaction }),
-    },
-  );
-
-  if (!response.ok) throw new Error("Unable to read activity data");
-
-  // batchGet is streamed as newline-delimited JSON by the Firestore REST API.
-  const documents = new Map<string, FirestoreDocument>();
-  for (const line of (await response.text()).split("\n")) {
-    if (!line) continue;
-    const result = JSON.parse(line) as { found?: FirestoreDocument };
-    if (result.found) documents.set(result.found.name, result.found);
+      ADMIN_APP_NAME,
+    );
+    return { auth: getAuth(app), db: getFirestore(app) };
+  } catch (error) {
+    console.error("Unable to initialize the Firebase Admin SDK:", error);
+    return null;
   }
-  return documents;
 }
 
 /** Records a completed chapter and awards its one-time 10 XP reading bonus. */
@@ -74,14 +57,20 @@ export async function POST(request: NextRequest) {
   const idToken = request.headers
     .get("authorization")
     ?.match(/^Bearer (.+)$/i)?.[1];
-  const projectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID;
-  const apiKey = process.env.NEXT_PUBLIC_FIREBASE_API_KEY;
 
   if (!idToken) {
-    return NextResponse.json({ error: "Missing authorization token" }, { status: 401 });
+    return NextResponse.json(
+      { error: "Missing authorization token" },
+      { status: 401 },
+    );
   }
-  if (!projectId || !apiKey) {
-    return NextResponse.json({ error: "Firebase is not configured" }, { status: 500 });
+
+  const admin = adminServices();
+  if (!admin) {
+    return NextResponse.json(
+      { error: "Firebase is not configured" },
+      { status: 500 },
+    );
   }
 
   const body = (await request.json().catch(() => null)) as {
@@ -90,100 +79,100 @@ export async function POST(request: NextRequest) {
     chapterId?: unknown;
   } | null;
   const { subject, unitId, chapterId } = body ?? {};
-  if (!isDocumentId(subject) || !isDocumentId(unitId) || !isDocumentId(chapterId)) {
+  if (
+    !isDocumentId(subject) ||
+    !isDocumentId(unitId) ||
+    !isDocumentId(chapterId)
+  ) {
     return NextResponse.json(
       { error: "subject, unitId, and chapterId must be valid document IDs" },
       { status: 400 },
     );
   }
 
-  const uid = await getAuthenticatedUid(idToken, apiKey);
-  if (!uid) {
-    return NextResponse.json({ error: "Invalid authorization token" }, { status: 401 });
+  // `true` rejects tokens whose session has been revoked, so the token is only
+  // ever proof of identity here and never a Firestore credential.
+  const decoded = await admin.auth
+    .verifyIdToken(idToken, true)
+    .catch(() => null);
+  if (!decoded) {
+    return NextResponse.json(
+      { error: "Invalid authorization token" },
+      { status: 401 },
+    );
   }
 
-  const baseUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
-  const chapterPath = `subjects/${encodeURIComponent(subject)}/units/${encodeURIComponent(unitId)}/chapters/${encodeURIComponent(chapterId)}`;
-  const chapterResponse = await fetch(`${baseUrl}/${chapterPath}`, {
-    headers: { Authorization: `Bearer ${idToken}` },
-  });
-  if (chapterResponse.status === 404) {
-    return NextResponse.json({ error: "Chapter not found" }, { status: 404 });
-  }
-  if (!chapterResponse.ok) {
-    return NextResponse.json({ error: "Not authorized to access this chapter" }, { status: 403 });
-  }
-
-  const beginResponse = await fetch(`${baseUrl}:beginTransaction`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${idToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({}),
-  });
-  if (!beginResponse.ok) {
-    return NextResponse.json({ error: "Unable to begin activity transaction" }, { status: 500 });
-  }
-  const { transaction } = (await beginResponse.json()) as { transaction?: string };
-  if (!transaction) {
-    return NextResponse.json({ error: "Unable to begin activity transaction" }, { status: 500 });
-  }
-
-  const userName = `projects/${projectId}/databases/(default)/documents/users/${uid}`;
-  const chapterDataName = `${userName}/chapterData/${chapterId}`;
+  const userRef = admin.db.doc(`users/${decoded.uid}`);
+  const chapterDataRef = userRef.collection("chapterData").doc(chapterId);
+  const chapterRef = admin.db.doc(
+    `subjects/${subject}/units/${unitId}/chapters/${chapterId}`,
+  );
 
   try {
-    const documents = await transactionDocuments(projectId, idToken, transaction, [
-      userName,
-      chapterDataName,
+    const [chapter, user] = await Promise.all([
+      chapterRef.get(),
+      userRef.get(),
     ]);
-    const user = documents.get(userName);
-    const chapterData = documents.get(chapterDataName);
-    const totalXp = integerField(user, "xp");
-
-    if (firestoreValue(chapterData, "readingXpAwarded")?.booleanValue === true) {
-      return NextResponse.json({ xpAwarded: 0, totalXp, alreadyRecorded: true });
+    if (!chapter.exists) {
+      return NextResponse.json({ error: "Chapter not found" }, { status: 404 });
     }
 
-    const commitResponse = await fetch(`${baseUrl}:commit`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${idToken}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        transaction,
-        writes: [
-          {
-            update: {
-              name: chapterDataName,
-              fields: {
-                progress: { stringValue: "Complete" },
-                readingXpAwarded: { booleanValue: true },
-              },
-            },
-            updateMask: { fieldPaths: ["progress", "readingXpAwarded"] },
-            updateTransforms: [
-              { fieldPath: "completedAt", setToServerValue: "REQUEST_TIME" },
-            ],
-          },
-          {
-            transform: {
-              document: userName,
-              fieldTransforms: [
-                { fieldPath: "xp", increment: { integerValue: String(READING_XP) } },
-              ],
-            },
-          },
-        ],
-      }),
-    });
-
-    if (!commitResponse.ok) {
-      return NextResponse.json({ error: "Unable to record completed reading" }, { status: 500 });
+    // Admin credentials ignore security rules, so the reader's own access to
+    // the chapter is checked here the way `firestore.rules` would.
+    const access = user.get("access") as unknown;
+    if (!user.exists || access === "banned") {
+      return NextResponse.json(
+        { error: "Not authorized to earn XP" },
+        { status: 403 },
+      );
+    }
+    if (
+      chapter.get("isPublic") !== true &&
+      !PRIVILEGED_ACCESS.includes(String(access))
+    ) {
+      return NextResponse.json(
+        { error: "Not authorized to access this chapter" },
+        { status: 403 },
+      );
     }
 
-    return NextResponse.json({
-      xpAwarded: READING_XP,
-      totalXp: totalXp + READING_XP,
-      alreadyRecorded: false,
+    const award = await admin.db.runTransaction(async (transaction) => {
+      const userDocument = await transaction.get(userRef);
+      const chapterData = await transaction.get(chapterDataRef);
+      const totalXp = Number(userDocument.get("xp")) || 0;
+
+      if (chapterData.get("readingXpAwarded") === true) {
+        return { xpAwarded: 0, totalXp, alreadyRecorded: true };
+      }
+
+      transaction.set(
+        chapterDataRef,
+        {
+          progress: "Complete",
+          readingXpAwarded: true,
+          completedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+      transaction.set(
+        userRef,
+        { xp: FieldValue.increment(READING_XP) },
+        { merge: true },
+      );
+
+      return {
+        xpAwarded: READING_XP,
+        totalXp: totalXp + READING_XP,
+        alreadyRecorded: false,
+      };
     });
-  } catch {
-    return NextResponse.json({ error: "Unable to record completed reading" }, { status: 500 });
+
+    return NextResponse.json(award);
+  } catch (error) {
+    console.error("Unable to record completed reading:", error);
+    return NextResponse.json(
+      { error: "Unable to record completed reading" },
+      { status: 500 },
+    );
   }
 }

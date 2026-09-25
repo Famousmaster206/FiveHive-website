@@ -29,7 +29,10 @@ service cloud.firestore {
       allow read: if isAuthenticated() && request.auth.uid == userId;
 
       allow create: if isAuthenticated() && request.auth.uid == userId && request.resource.data.access == "user";
-      allow update: if isAuthenticated() && request.auth.uid == userId && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['access', 'uid']));
+      // `xp` is a reward balance: only the server, running with admin
+      // credentials, may change it. A client that could write it could mint
+      // any amount for itself.
+      allow update: if isAuthenticated() && request.auth.uid == userId && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['access', 'uid', 'xp']));
       allow delete: if isAuthenticated() && request.auth.uid == userId;
 
       match /frqResponses/{document=**} {
@@ -39,9 +42,21 @@ service cloud.firestore {
         allow update: if isGraderOrMemberOrAdmin() && (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['feedback', 'grade', 'gradedAt', 'gradedBy', 'status']));
       }
 
+      // Self-reported study progress, except for the fields that record an XP
+      // award. Those are written by the activity endpoints alone, and a
+      // completed chapter's record cannot be cleared, so the one-time reading
+      // bonus cannot be collected twice.
       match /chapterData/{document=**} {
-        allow read, write: if isAuthenticated() && request.auth.uid == userId;
+        allow read: if isAuthenticated() && request.auth.uid == userId;
+
+        allow create: if isAuthenticated() && request.auth.uid == userId && !request.resource.data.keys().hasAny(awardedFields());
+        allow update: if isAuthenticated() && request.auth.uid == userId && !request.resource.data.diff(resource.data).affectedKeys().hasAny(awardedFields());
+        allow delete: if isAuthenticated() && request.auth.uid == userId && resource.data.get('readingXpAwarded', false) != true;
       }
+    }
+
+    function awardedFields() {
+      return ['readingXpAwarded', 'completedAt'];
     }
 
     function canSubmitFrqResponse() {
