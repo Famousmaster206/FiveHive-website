@@ -1,13 +1,15 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { FieldValue } from "firebase-admin/firestore";
-import { getAdminAuth, getAdminDb } from "@/lib/firebase-admin";
+import { getAdminDb } from "@/lib/firebase-admin";
 import { formatSlug } from "@/lib/utils";
-import type { ActivityAwardResponse } from "@/types/dashboard";
-
-const READING_XP = 10;
-
-const isDocumentId = (value: unknown): value is string =>
-  typeof value === "string" && value.trim().length > 0 && !value.includes("/");
+import {
+  dashboardDocumentPaths,
+  type ActivityAwardResponse,
+} from "@/types/dashboard";
+import { addXp, readXpTotal } from "@/lib/gamification/xp";
+import { loadXpConfig } from "@/lib/gamification/loadXpConfig";
+import { resolveActivityDay } from "@/lib/gamification/streak";
+import { isDocumentId, requireUser } from "@/lib/server/activityRequest";
 
 const nonNegativeNumber = (value: unknown, fallback: number) =>
   typeof value === "number" && Number.isFinite(value) && value >= 0
@@ -19,46 +21,21 @@ const record = (value: unknown): Record<string, unknown> =>
     ? (value as Record<string, unknown>)
     : {};
 
-const dayKeyFor = (timeZone: unknown) => {
-  const resolvedTimeZone = typeof timeZone === "string" ? timeZone : "UTC";
-
-  try {
-    const values = new Intl.DateTimeFormat("en-US", {
-      timeZone: resolvedTimeZone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    })
-      .formatToParts(new Date())
-      .reduce<Record<string, string>>((parts, part) => {
-        parts[part.type] = part.value;
-        return parts;
-      }, {});
-    return `${values.year}-${values.month}-${values.day}`;
-  } catch {
-    return dayKeyFor("UTC");
-  }
-};
-
-/** Records a completed chapter and awards its one-time 10 XP reading bonus. */
+/**
+ * Records a completed chapter and awards its one-time reading XP. Readings
+ * don't count toward a streak (#264), so they earn no streak bonus.
+ */
 export async function POST(request: NextRequest) {
-  const adminAuth = getAdminAuth();
+  const caller = await requireUser(request);
+  if ("error" in caller) return caller.error;
+  const { uid } = caller;
   const adminDb = getAdminDb();
-  const idToken = request.headers
-    .get("authorization")
-    ?.match(/^Bearer (.+)$/i)?.[1];
-
-  if (!idToken) {
-    return NextResponse.json(
-      { error: "Missing authorization token" },
-      { status: 401 },
-    );
-  }
 
   const body = (await request.json().catch(() => null)) as {
     subject?: unknown;
     unitId?: unknown;
     chapterId?: unknown;
+    timeZone?: unknown;
   } | null;
   const { subject, unitId, chapterId } = body ?? {};
   if (
@@ -72,25 +49,16 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  let uid: string;
-  try {
-    uid = (await adminAuth.verifyIdToken(idToken)).uid;
-  } catch {
-    return NextResponse.json(
-      { error: "Invalid authorization token" },
-      { status: 401 },
-    );
-  }
-
   const subjectRef = adminDb.collection("subjects").doc(subject);
   const chapterRef = subjectRef
     .collection("units")
     .doc(unitId)
     .collection("chapters")
     .doc(chapterId);
-  const [subjectSnapshot, chapterSnapshot] = await Promise.all([
+  const [subjectSnapshot, chapterSnapshot, xpConfig] = await Promise.all([
     subjectRef.get(),
     chapterRef.get(),
+    loadXpConfig(),
   ]);
   if (!chapterSnapshot.exists) {
     return NextResponse.json({ error: "Chapter not found" }, { status: 404 });
@@ -109,43 +77,67 @@ export async function POST(request: NextRequest) {
     unitIndex >= 0
       ? `/subject/${subject}/unit-${displayUnit}-${unitId}/chapter/${chapterId}/${formatSlug(chapterTitle)}`
       : `/subject/${subject}`;
+  const totalReadings = units.reduce(
+    (count, unit) =>
+      count + (Array.isArray(unit.chapters) ? unit.chapters.length : 0),
+    0,
+  );
 
   try {
     const result = await adminDb.runTransaction(async (transaction) => {
-      const userRef = adminDb.collection("users").doc(uid);
-      const chapterDataRef = userRef.collection("chapterData").doc(chapterId);
-      const activityRef = adminDb
-        .collection("activityEvents")
-        .doc(`${uid}_reading_${chapterId}`);
-      const [user, chapterData, activity] = await Promise.all([
-        transaction.get(userRef),
+      const chapterDataRef = adminDb
+        .collection("users")
+        .doc(uid)
+        .collection("chapterData")
+        .doc(chapterId);
+      const statsRef = adminDb.doc(dashboardDocumentPaths.stats(uid));
+      const activityRef = adminDb.doc(
+        dashboardDocumentPaths.activity(`${uid}_reading_${chapterId}`),
+      );
+      const [stats, chapterData, activity] = await Promise.all([
+        transaction.get(statsRef),
         transaction.get(chapterDataRef),
         transaction.get(activityRef),
       ]);
-      const userData = user.data();
-      const totalXp = nonNegativeNumber(userData?.xp, 0);
-      const level = nonNegativeNumber(userData?.level, 1);
-      const currentStreak = nonNegativeNumber(userData?.currentStreak, 0);
+      const statsData = stats.data();
+      const totalXp = readXpTotal(statsData);
+      const level = nonNegativeNumber(statsData?.level, 1);
+      const currentStreak = nonNegativeNumber(statsData?.currentStreak, 0);
+      // Readings don't move the streak, so the stored zone is left alone.
+      const { day: dayKey } = resolveActivityDay(
+        new Date(),
+        statsData?.timeZone,
+        body?.timeZone,
+      );
+      const event = {
+        id: activityRef.id,
+        userId: uid,
+        type: "reading",
+        subject,
+        unitId,
+        sourceId: chapterId,
+        label: chapterTitle,
+        href,
+        occurredAt: FieldValue.serverTimestamp(),
+        dayKey,
+        xpAwarded: xpConfig.readingComplete,
+        gradeStatus: "none",
+      };
 
-      if (chapterData.data()?.readingXpAwarded === true) {
-        // Writes omitted by a prior deployment are safely backfilled without
-        // changing XP or creating a duplicate event.
-        if (!activity.exists) {
-          transaction.create(activityRef, {
-            id: activityRef.id,
-            userId: uid,
-            type: "reading",
-            subject,
-            unitId,
-            sourceId: chapterId,
-            label: chapterTitle,
-            href,
-            occurredAt: FieldValue.serverTimestamp(),
-            dayKey: dayKeyFor(userData?.timeZone),
-            xpAwarded: READING_XP,
-            gradeStatus: "none",
-          });
-        }
+      // The activity event is what really guards the award: the receipt on
+      // chapterData can be missing (a deleted document, or a write a prior
+      // deployment omitted) while the event, and the XP, already exist.
+      if (activity.exists || chapterData.data()?.readingXpAwarded === true) {
+        // The tracker leaves saving "Complete" to this route, so a chapter
+        // marked Complete again still has to store it. The receipt is
+        // restored with it, and a missing event is backfilled, neither of
+        // which changes XP.
+        transaction.set(
+          chapterDataRef,
+          { progress: "Complete", readingXpAwarded: true },
+          { merge: true },
+        );
+        if (!activity.exists) transaction.create(activityRef, event);
         return {
           xpAwarded: 0,
           totalXp,
@@ -157,6 +149,9 @@ export async function POST(request: NextRequest) {
         } satisfies ActivityAwardResponse;
       }
 
+      const xpAwarded = xpConfig.readingComplete;
+      const progress = addXp(totalXp, xpAwarded);
+
       transaction.set(
         chapterDataRef,
         {
@@ -166,27 +161,36 @@ export async function POST(request: NextRequest) {
         },
         { merge: true },
       );
-      transaction.update(userRef, { xp: FieldValue.increment(READING_XP) });
-      transaction.create(activityRef, {
-        id: activityRef.id,
-        userId: uid,
-        type: "reading",
-        subject,
-        unitId,
-        sourceId: chapterId,
-        label: chapterTitle,
-        href,
-        occurredAt: FieldValue.serverTimestamp(),
-        dayKey: dayKeyFor(userData?.timeZone),
-        xpAwarded: READING_XP,
-        gradeStatus: "none",
-      });
+      // The dashboard reads XP from userStats, like the MCQ and FRQ routes
+      // write it, so a reading's XP has to land there too.
+      transaction.set(
+        statsRef,
+        {
+          uid,
+          xp: progress.xp,
+          level: progress.level,
+          xpIntoLevel: progress.xpIntoLevel,
+          xpForNextLevel: progress.xpForNextLevel,
+          readingsCompleted: FieldValue.increment(1),
+          perSubject: {
+            [subject]: {
+              subjectSlug: subject,
+              readingsCompleted: FieldValue.increment(1),
+              totalReadings,
+              lastActiveAt: FieldValue.serverTimestamp(),
+            },
+          },
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+      transaction.create(activityRef, event);
 
       return {
-        xpAwarded: READING_XP,
-        totalXp: totalXp + READING_XP,
-        level,
-        leveledUp: false,
+        xpAwarded,
+        totalXp: progress.xp,
+        level: progress.level,
+        leveledUp: progress.leveledUp,
         currentStreak,
         newlyUnlocked: [],
         alreadyRecorded: false,
@@ -194,7 +198,8 @@ export async function POST(request: NextRequest) {
     });
 
     return NextResponse.json(result);
-  } catch {
+  } catch (error) {
+    console.error("Unable to record completed reading", error);
     return NextResponse.json(
       { error: "Unable to record completed reading" },
       { status: 500 },

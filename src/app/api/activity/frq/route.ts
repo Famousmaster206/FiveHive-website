@@ -1,16 +1,19 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
+import { getAdminDb, hasExplicitAdminCredentials } from "@/lib/firebase-admin";
 import {
-  getAdminAuth,
-  getAdminDb,
-  hasExplicitAdminCredentials,
-} from "@/lib/firebase-admin";
-import type { ActivityAwardResponse, GradeStatus } from "@/types/dashboard";
+  dashboardDocumentPaths,
+  type ActivityAwardResponse,
+  type GradeStatus,
+} from "@/types/dashboard";
 import {
   readStreakState,
   recordActiveDay,
   resolveActivityDay,
 } from "@/lib/gamification/streak";
+import { addXp, readXpTotal, streakXp } from "@/lib/gamification/xp";
+import { loadXpConfig } from "@/lib/gamification/loadXpConfig";
+import { isDocumentId, requireUser } from "@/lib/server/activityRequest";
 
 /**
  * How long after submitting an FRQ it can still be recorded. The browser
@@ -28,20 +31,20 @@ const SUBMISSION_COLLECTIONS: [string, GradeStatus][] = [
   ["graded-frqs", "graded"],
 ];
 
-const isDocumentId = (value: unknown): value is string =>
-  typeof value === "string" && value.trim().length > 0 && !value.includes("/");
-
 const nonNegativeNumber = (value: unknown, fallback: number) =>
   typeof value === "number" && Number.isFinite(value) && value >= 0
     ? value
     : fallback;
 
-/** The FRQ's title and a link back to it, for the dashboard's activity list. */
+/**
+ * The FRQ's title and a link back to it, for the dashboard's activity list,
+ * and whether it is published.
+ */
 async function describeFrq(
   subject: string,
   unitId: string,
   templateId: string,
-): Promise<{ label: string; href: string }> {
+): Promise<{ label: string; href: string; isPublic: boolean }> {
   const adminDb = getAdminDb();
   const [subjectSnapshot, templateSnapshot] = await adminDb.getAll(
     adminDb.collection("subjects").doc(subject),
@@ -54,7 +57,8 @@ async function describeFrq(
       .doc(templateId),
   );
 
-  const title: unknown = templateSnapshot?.data()?.title;
+  const template = templateSnapshot?.data();
+  const title: unknown = template?.title;
   const subjectData = subjectSnapshot?.data();
   const units: unknown[] = Array.isArray(subjectData?.units)
     ? subjectData.units
@@ -74,26 +78,27 @@ async function describeFrq(
       unitIndex >= 0
         ? `/subject/${subject}/unit-${unitNumber}-${unitId}/frq/${templateId}`
         : `/subject/${subject}`,
+    isPublic: template?.isPublic === true,
   };
 }
 
 /**
  * Records a submitted FRQ as study activity: it counts toward the student's
- * daily streak and their activity calendar. The submission is re-read here
- * rather than trusted from the request, and each one is only counted once.
+ * daily streak and their activity calendar, and earns XP. The submission is
+ * re-read here rather than trusted from the request, and each one is only
+ * counted once.
+ *
+ * Submission XP is paid once per FRQ, not per submission: nothing limits how
+ * often a student can resubmit, so paying every time would let them farm XP
+ * by submitting the same FRQ over and over. A resubmission still counts
+ * toward the streak. An unpublished FRQ isn't recorded at all, matching the
+ * MCQ route, so staff previewing a draft earn nothing from it.
  */
 export async function POST(request: NextRequest) {
-  const adminAuth = getAdminAuth();
+  const caller = await requireUser(request);
+  if ("error" in caller) return caller.error;
+  const { uid } = caller;
   const adminDb = getAdminDb();
-  const idToken = request.headers
-    .get("authorization")
-    ?.match(/^Bearer (.+)$/i)?.[1];
-  if (!idToken) {
-    return NextResponse.json(
-      { error: "Missing authorization token" },
-      { status: 401 },
-    );
-  }
 
   const body = (await request.json().catch(() => null)) as {
     submissionId?: unknown;
@@ -104,17 +109,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       { error: "submissionId must be a valid document ID" },
       { status: 400 },
-    );
-  }
-
-  let uid: string;
-  try {
-    uid = (await adminAuth.verifyIdToken(idToken)).uid;
-  } catch (error) {
-    console.error("Unable to verify FRQ activity token", error);
-    return NextResponse.json(
-      { error: "Invalid authorization token" },
-      { status: 401 },
     );
   }
 
@@ -174,21 +168,42 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const eventRef = adminDb
-    .collection("activityEvents")
-    .doc(`${uid}_frq_${submissionId}`);
-  const statsRef = adminDb.collection("userStats").doc(uid);
+  const eventRef = adminDb.doc(
+    dashboardDocumentPaths.activity(`${uid}_frq_${submissionId}`),
+  );
+  const statsRef = adminDb.doc(dashboardDocumentPaths.stats(uid));
+  // A server-only receipt: its existence means this student has already been
+  // paid for submitting this FRQ.
+  const xpAwardRef = adminDb
+    .collection("xpAwards")
+    .doc(`${uid}_frq_${templateId}`);
 
   try {
-    const { label, href } = await describeFrq(subject, unitId, templateId);
+    const [{ label, href, isPublic }, xpConfig] = await Promise.all([
+      describeFrq(subject, unitId, templateId),
+      loadXpConfig(),
+    ]);
+    // The Admin SDK bypasses Firestore rules, so the publication boundary has
+    // to be checked here, as the MCQ route does.
+    if (!isPublic) {
+      return NextResponse.json(
+        { error: "FRQ is not published" },
+        { status: 403 },
+      );
+    }
 
     const result = await adminDb.runTransaction(async (transaction) => {
-      const [event, stats] = await transaction.getAll(eventRef, statsRef);
+      const [event, stats, xpAward] = await transaction.getAll(
+        eventRef,
+        statsRef,
+        xpAwardRef,
+      );
       const statsData = stats?.data();
       const streak = readStreakState(statsData);
+      const totalXp = readXpTotal(statsData);
       const response: ActivityAwardResponse = {
         xpAwarded: 0,
-        totalXp: nonNegativeNumber(statsData?.xp, 0),
+        totalXp,
         level: nonNegativeNumber(statsData?.level, 1),
         leveledUp: false,
         currentStreak: streak.currentStreak,
@@ -204,9 +219,28 @@ export async function POST(request: NextRequest) {
       );
       const next = recordActiveDay(streak, day);
       const year = day.slice(0, 4);
-      const calendarRef = adminDb
-        .collection("activityCalendar")
-        .doc(`${uid}_${year}`);
+      const calendarRef = adminDb.doc(
+        dashboardDocumentPaths.calendar(uid, year),
+      );
+
+      const paysSubmissionXp = !xpAward?.exists;
+      const xpAwarded =
+        (paysSubmissionXp ? xpConfig.frqSubmission : 0) +
+        streakXp(streak, next, xpConfig);
+      const progress = addXp(totalXp, xpAwarded);
+
+      if (paysSubmissionXp) {
+        transaction.create(xpAwardRef, {
+          userId: uid,
+          type: "frq",
+          subject,
+          unitId,
+          sourceId: templateId,
+          submissionId,
+          xpAwarded: xpConfig.frqSubmission,
+          awardedAt: FieldValue.serverTimestamp(),
+        });
+      }
 
       transaction.create(eventRef, {
         id: eventRef.id,
@@ -219,14 +253,17 @@ export async function POST(request: NextRequest) {
         href,
         occurredAt: FieldValue.serverTimestamp(),
         dayKey: day,
-        // XP for FRQs belongs to the XP system (#263); this records the day.
-        xpAwarded: 0,
+        xpAwarded,
         gradeStatus,
       });
       transaction.set(
         statsRef,
         {
           uid,
+          xp: progress.xp,
+          level: progress.level,
+          xpIntoLevel: progress.xpIntoLevel,
+          xpForNextLevel: progress.xpForNextLevel,
           currentStreak: next.currentStreak,
           longestStreak: next.longestStreak,
           lastActiveDay: next.lastActiveDay,
@@ -249,6 +286,10 @@ export async function POST(request: NextRequest) {
 
       return {
         ...response,
+        xpAwarded,
+        totalXp: progress.xp,
+        level: progress.level,
+        leveledUp: progress.leveledUp,
         currentStreak: next.currentStreak,
         alreadyRecorded: false,
       };
