@@ -353,7 +353,7 @@ check(
   },
 );
 check(
-  "notifications are private, server-created, and acknowledge-only with server timestamps",
+  "notification acknowledgements require server read time and expiry near 48 hours",
   async () => {
     const path = "notifications/student/items/notice";
     const original = { title: "Earned", readAt: null, expiresAt: null };
@@ -371,6 +371,29 @@ check(
     }
     await status(await doc(path, "student", "DELETE"), 403);
     await status(await doc(`${path}-new`, "student", "PATCH", original), 403);
-    await status(await commit("student", path, original, ["readAt"]), 200);
+    const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
+    await status(await commit("student", path, original, ["readAt"]), 403);
+    for (const invalidExpiry of [null, "invalid", new Date(),
+      new Date(Date.now() + 47 * 60 * 60 * 1000),
+      new Date(Date.now() + 49 * 60 * 60 * 1000)]) {
+      await status(await commit("student", path,
+        { ...original, expiresAt: invalidExpiry }, ["readAt"]), 403);
+    }
+    await status(await commit("other", path, { ...original, expiresAt }, ["readAt"]), 403);
+    await status(await commit("student", path,
+      { ...original, title: "Forged", expiresAt }, ["readAt"]), 403);
+    await status(await commit("student", path,
+      { ...original, readAt: new Date(0), expiresAt }), 403);
+    // Both sides of the browser/server clock tolerance are accepted.
+    for (const skewMinutes of [-4, 0, 4]) {
+      await status(await commit("student", path, {
+        ...original,
+        expiresAt: new Date(Date.now() + (48 * 60 + skewMinutes) * 60 * 1000),
+      }, ["readAt"]), 200);
+    }
+    const saved = await doc(path, "student");
+    const stored = (await saved.json()).fields;
+    assert.ok(stored.readAt.timestampValue);
+    assert.ok(stored.expiresAt.timestampValue);
   },
 );

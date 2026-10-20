@@ -129,7 +129,7 @@ export interface AppNotification {
   href: string;
   createdAt: Timestamp;
   readAt: Timestamp | null;
-  expiresAt: Timestamp | null; // Set a timestamp once retention is configured; TTL ignores null.
+  expiresAt: Timestamp | null; // Null while unread; 48 hours after acknowledgement.
 }
 
 export interface SavedItem {

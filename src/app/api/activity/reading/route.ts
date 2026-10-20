@@ -1,3 +1,4 @@
+import { notifyLevelUp } from "@/lib/server/createNotification";
 import { NextResponse, type NextRequest } from "next/server";
 import { FieldValue } from "firebase-admin/firestore";
 import { getAdminDb } from "@/lib/firebase-admin";
@@ -171,6 +172,7 @@ export async function POST(request: NextRequest) {
         readingsCompleted: nonNegativeNumber(statsData?.readingsCompleted, 0) + 1,
       });
 
+      notifyLevelUp(transaction, adminDb, uid, progress);
       transaction.set(
         chapterDataRef,
         {

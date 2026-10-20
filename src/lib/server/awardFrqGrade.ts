@@ -3,7 +3,7 @@ import {
   Timestamp,
   type Firestore,
 } from "firebase-admin/firestore";
-import { createNotification } from "./createNotification.ts";
+import { createNotification, notifyLevelUp } from "./createNotification.ts";
 import { awardAchievements } from "./awardAchievements.ts";
 import {
   dashboardDocumentPaths,
@@ -110,10 +110,14 @@ export async function awardFrqGrade(
     const notificationReceiptRef = db
       .collection("xpAwards")
       .doc(`frq_grade_${submissionId}`);
-    const [stats, receipt, notificationReceipt] = await transaction.getAll(
+    const eventRef = db.doc(
+      dashboardDocumentPaths.activity(`${studentId}_frq_${submissionId}`),
+    );
+    const [stats, receipt, notificationReceipt, event] = await transaction.getAll(
       statsRef,
       receiptRef,
       notificationReceiptRef,
+      eventRef,
     );
     const statsData = stats?.data();
     const progress = addXp(readXpTotal(statsData), 0);
@@ -308,13 +312,11 @@ export async function awardFrqGrade(
     const notification = await transaction.get(notificationRef);
     const shouldNotify =
       notificationState?.notificationCreated !== true && !notification.exists;
-    if (
+    const alreadyRecorded =
       xpAwarded === 0 &&
       !shouldNotify &&
       notificationState?.notificationCreated === true &&
-      receipt?.exists
-    )
-      return response;
+      receipt?.exists;
 
     const next = addXp(progress.xp, xpAwarded);
     const newlyUnlocked =
@@ -324,6 +326,23 @@ export async function awardFrqGrade(
             level: next.level,
           })
         : [];
+    // Refresh the existing submission event even on zero-XP regrades/retries.
+    // Preserve its submission date, XP, and calendar/streak accounting. A missing
+    // event is left for the submission route to record with complete metadata.
+    if (event?.exists) {
+      transaction.set(
+        eventRef,
+        {
+          gradeStatus: "graded",
+          score: { correct: earned, total: maximum },
+          href: `/frq-feedback/${submissionId}`,
+        },
+        { merge: true },
+      );
+    }
+    if (alreadyRecorded) return response;
+    notifyLevelUp(transaction, db, studentId, next);
+
     if (shouldNotify) {
       createNotification(transaction, notificationRef, {
         type: "frq_graded",

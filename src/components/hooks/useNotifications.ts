@@ -10,6 +10,7 @@ import {
   query,
   serverTimestamp,
   updateDoc,
+  Timestamp,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import {
@@ -54,6 +55,7 @@ export function useNotifications(uid: string | undefined) {
     if (!uid) return;
     await updateDoc(doc(db, dashboardDocumentPaths.notification(uid, id)), {
       readAt: serverTimestamp(),
+      expiresAt: Timestamp.fromMillis(Date.now() + 48 * 60 * 60 * 1000),
     });
   };
   return {

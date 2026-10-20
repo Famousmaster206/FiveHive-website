@@ -22,6 +22,15 @@ const FRQ_STATUS: Record<GradeStatus, string> = {
   self_graded: "Self-graded",
 };
 
+/** Shared by recent activity and submission history. */
+export function frqActivityStatus(event: ActivityEvent): string {
+  const status = FRQ_STATUS[event.gradeStatus];
+  return event.score &&
+    (event.gradeStatus === "graded" || event.gradeStatus === "self_graded")
+    ? `${status} · ${event.score.correct}/${event.score.total}`
+    : status;
+}
+
 export interface HistoryRow {
   id: string;
   type: ActivityType;
@@ -56,7 +65,7 @@ export function toHistoryRow(event: ActivityEvent): HistoryRow {
   let action = "Open reading";
 
   if (event.type === "frq") {
-    status = FRQ_STATUS[event.gradeStatus];
+    status = frqActivityStatus(event);
     // A graded FRQ's id is its submission's, which is also the id of its
     // result in graded-frqs or self-graded-frqs, where the feedback page
     // looks it up.

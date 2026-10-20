@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { Timestamp } from "firebase/firestore";
 import {
   formatDayKey,
+  frqActivityStatus,
   toHistoryRow,
   toHistoryRows,
 } from "../src/lib/dashboard/history.ts";
@@ -107,4 +108,12 @@ test("rows are newest first", () => {
 
 test("no events means no rows, for the empty state", () => {
   assert.deepEqual(toHistoryRows(EMPTY_EVENTS), []);
+});
+
+test("graded FRQ activity and history display the saved score, including zero", () => {
+  for (const correct of [0, 4]) {
+    const graded = event({ gradeStatus: "graded", score: { correct, total: 6 } });
+    assert.equal(frqActivityStatus(graded), `Graded · ${correct}/6`);
+    assert.equal(toHistoryRow(graded).status, `Graded · ${correct}/6`);
+  }
 });

@@ -1,3 +1,4 @@
+import { notifyLevelUp } from "@/lib/server/createNotification";
 import { NextResponse, type NextRequest } from "next/server";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { getAdminDb, hasExplicitAdminCredentials } from "@/lib/firebase-admin";
@@ -234,6 +235,7 @@ export async function POST(request: NextRequest) {
         frqsSubmitted: nonNegativeNumber(statsData?.frqsSubmitted, 0) + 1,
       });
 
+      notifyLevelUp(transaction, adminDb, uid, progress);
       if (paysSubmissionXp) {
         transaction.create(xpAwardRef, {
           userId: uid,

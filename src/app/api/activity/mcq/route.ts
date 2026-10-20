@@ -1,3 +1,4 @@
+import { notifyLevelUp } from "@/lib/server/createNotification";
 import { NextResponse, type NextRequest } from "next/server";
 import { FieldValue } from "firebase-admin/firestore";
 import { getAdminDb, hasExplicitAdminCredentials } from "@/lib/firebase-admin";
@@ -166,6 +167,7 @@ export async function POST(request: NextRequest) {
         problemsSolved: (typeof statsData.problemsSolved === "number" ? statsData.problemsSolved : 0) + correct,
         subjectsCompleted,
       });
+      notifyLevelUp(transaction, adminDb, uid, progress);
       completion.write();
 
       transaction.set(eventRef, {

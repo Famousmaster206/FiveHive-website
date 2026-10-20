@@ -405,6 +405,7 @@ void test("MCQ legacy event ID collisions still record distinct completions once
       isDocumentId: (value: unknown) =>
         typeof value === "string" && !value.includes("/"),
     },
+    "@/lib/server/createNotification": { notifyLevelUp: () => {} },
     "@/lib/server/awardAchievements": { awardAchievements: async () => [] },
     "@/lib/server/testCompletion": {
       prepareTestCompletion: async () => ({

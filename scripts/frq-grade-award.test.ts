@@ -302,7 +302,7 @@ void test("pays the student, updates levels, and leaves streak/calendar untouche
   assert.equal(db.docs.get(statsPath)?.frqsSubmitted, 1);
   assert.deepEqual(
     db.writes.sort(),
-    [statsPath, receiptPath, notificationPath, notificationReceiptPath].sort(),
+    [statsPath, receiptPath, notificationPath, notificationReceiptPath, "notifications/student/items/level_up_2"].sort(),
   );
   assert.equal(db.docs.has("userStats/staff"), false);
   assert.equal(db.docs.get(receiptPath)?.xpAwarded, 17);
@@ -714,4 +714,91 @@ void test("FRQ grade XP can unlock a level achievement for the student", async (
   assert.ok(db.docs.has("notifications/student/items/achievement_level-5"));
   assert.equal(db.docs.get(statsPath)?.currentStreak, 4);
   assert.equal((await award(db)).newlyUnlocked.length, 0);
+});
+
+void test("grading updates the existing feed event atomically and preserves study accounting", async () => {
+  const db = fixture();
+  const path = "activityEvents/student_frq_attempt";
+  const original = {
+    gradeStatus: "pending",
+    dayKey: "2026-10-01",
+    occurredAt: Timestamp.fromMillis(500),
+    xpAwarded: 10,
+    label: "FRQ",
+  };
+  db.put(path, original);
+  const calendar = { days: { "2026-10-01": 1 } };
+  db.put("activityCalendar/student_2026", calendar);
+  await Promise.all([award(db), award(db)]);
+  assert.deepEqual(db.docs.get(path), {
+    ...original,
+    gradeStatus: "graded",
+    score: { correct: 4, total: 6 },
+    href: "/frq-feedback/attempt",
+  });
+  // A lower regrade has no XP payout but must still refresh the displayed score.
+  db.put(resultPath, { ...grade, ...scoreFields("1/6") });
+  assert.equal((await award(db)).xpAwarded, 0);
+  assert.deepEqual(db.docs.get(path)?.score, { correct: 1, total: 6 });
+  assert.deepEqual(db.docs.get("activityCalendar/student_2026"), calendar);
+  assert.equal(db.docs.get(statsPath)?.currentStreak, 4);
+  assert.equal(db.docs.get(statsPath)?.lastActiveDay, "2026-10-01");
+  assert.equal(db.writes.some((path) => path.startsWith("activityCalendar/")), false);
+});
+
+void test("invalid grades cannot change the activity feed", async () => {
+  const db = fixture();
+  const path = "activityEvents/student_frq_attempt";
+  db.put(path, { gradeStatus: "pending" });
+  db.put(resultPath, { ...grade, score: "5/6" });
+  await assert.rejects(award(db), /does not match/);
+  assert.deepEqual(db.docs.get(path), { gradeStatus: "pending" });
+  assert.deepEqual(db.writes, []);
+});
+
+void test("level-up notifications commit with XP once under concurrent retries", async () => {
+  const db = fixture();
+  const path = "notifications/student/items/level_up_2";
+  await Promise.all([award(db), award(db)]);
+  const notification = db.docs.get(path)!;
+  assert.equal(notification.type, "level_up");
+  assert.equal(notification.title, "Level up");
+  assert.equal(notification.body, "You reached level 2!");
+  assert.equal(notification.href, "/dashboard");
+  assert.equal(notification.readAt, null);
+  assert.equal(notification.expiresAt, null);
+  assert.ok(notification.createdAt);
+  assert.equal(db.docs.get(statsPath)?.level, 2);
+  assert.equal(db.writes.filter((written) => written === path).length, 1);
+  // Deleting a notification does not undo the durable XP/level transition.
+  db.docs.delete(path);
+  await award(db);
+  assert.equal(db.docs.has(path), false);
+});
+
+void test("awards within a level and zero XP do not create level-up notifications", async () => {
+  for (const xp of [0, 100]) {
+    const db = fixture();
+    db.put(statsPath, { ...db.docs.get(statsPath), xp });
+    await award(db);
+    assert.equal(db.writes.some((path) => path.includes("/level_up_")), false);
+  }
+  const db = fixture();
+  await award(db, 0);
+  assert.equal(db.writes.some((path) => path.includes("/level_up_")), false);
+});
+
+void test("multi-level jumps notify the final level and later levels can notify again", async () => {
+  const db = fixture();
+  await award(db, 1500);
+  const firstLevel = db.docs.get(statsPath)?.level as number;
+  assert.ok(firstLevel > 2);
+  assert.equal(db.docs.get(`notifications/student/items/level_up_${firstLevel}`)?.body,
+    `You reached level ${firstLevel}!`);
+  assert.equal(db.writes.filter((path) => path.includes("/level_up_")).length, 1);
+  db.put(resultPath, { ...grade, ...scoreFields("6/6") });
+  await award(db, 1500);
+  const nextLevel = db.docs.get(statsPath)?.level as number;
+  assert.ok(nextLevel > firstLevel);
+  assert.ok(db.docs.has(`notifications/student/items/level_up_${nextLevel}`));
 });

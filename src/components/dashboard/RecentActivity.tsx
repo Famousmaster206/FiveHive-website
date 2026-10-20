@@ -2,19 +2,13 @@
 
 import { useRef } from "react";
 import Link from "next/link";
-import type { ActivityEvent, GradeStatus } from "@/types/dashboard";
+import type { ActivityEvent } from "@/types/dashboard";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { findCourse } from "@/lib/dashboard/subjects";
 import { cn } from "@/lib/utils";
 import { useActivityPage } from "@/components/hooks/useActivityPage";
+import { frqActivityStatus } from "@/lib/dashboard/history";
 import Pager from "@/components/dashboard/Pager";
-
-const FRQ_STATUS: Record<GradeStatus, string> = {
-  none: "Submitted",
-  pending: "Awaiting grade",
-  graded: "Graded",
-  self_graded: "Self-graded",
-};
 
 function unitLabel(unitId: string): string | null {
   const match = /^unit-(\d+)/.exec(unitId);
@@ -40,7 +34,7 @@ function describe(event: ActivityEvent) {
   if (event.type === "frq") {
     return {
       item: event.label,
-      detail: FRQ_STATUS[event.gradeStatus],
+      detail: frqActivityStatus(event),
       action: "View FRQ",
     };
   }
